@@ -1,8 +1,7 @@
 import { Button, Dropdown, Menu, Space } from "antd"
 import { DownOutlined } from '@ant-design/icons';
 import { useContext, useEffect, useState } from "react";
-import { Connector } from '@web3-react/types';
-import { Context, hooks, metamaskConnector } from "../App";
+import { Context, metamaskConnector } from "../App";
 import { chainInfo } from "../services/web3.hook";
 
 function NetworkSelector() {
@@ -11,8 +10,13 @@ function NetworkSelector() {
     const { account, chainId, switchNetwork } = web3Hooks
     // const { useChainId, useAccounts, useIsActivating, useIsActive, useProvider, useENSNames } = hooks
     // const chainId = useChainId()
+    console.log('useNetwork', 1)
     const [network, setNetwork] = useState('Mumbai')
+    console.log('useNetwork', 2)
+
     let defaultChainId = parseInt(process.env.REACT_APP_DEFAULT_NETWORK)
+    console.log('useNetwork', 3)
+
     const [selectedChainId, setSelectedChainId] = useState(chainId.chainId || defaultChainId)
 
     function onNetworkChange(_network: string) {
