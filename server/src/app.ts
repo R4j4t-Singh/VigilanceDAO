@@ -190,6 +190,17 @@ function getProvider(chain_id: string) {
 	}
 }
 
+function getEtherscanURL(chain_id: string) {
+	if (chain_id == Networks.ETHEREUM_MAINNET.valueOf()) {
+		return 'https://etherscan.io'
+	}
+	else if (chain_id == Networks.POLYGON_MAINNET.valueOf()) {
+		return 'https://polygonscan.com'
+	} else {
+		throw new Error('Invalid chain id')
+	}
+}
+
 async function getCreationDate(client: PoolClient, address: string, network: string): Promise<{
 	riskRating: string,
 	feedback: string[],
@@ -197,23 +208,25 @@ async function getCreationDate(client: PoolClient, address: string, network: str
 	date: string,
 }> {
   try {
-    const query = 'SELECT * FROM "ContractAddresses" WHERE "address" LIKE $1';
-    var contractData = await client.query(query, [address]);  
+    const query = 'SELECT * FROM "ContractAddresses" WHERE "address" LIKE $1 AND "network" LIKE $2';
+    var contractData = await client.query(query, [address, network]);  
     
     if(contractData.rowCount == 0){
-      const query1 = 'INSERT INTO "ContractAddresses"("address") VALUES($1)';
-      await client.query(query1, [address]);
-      contractData = await client.query(query, [address]);
+      const query1 = 'INSERT INTO "ContractAddresses"("address", "network") VALUES($1, $2)';
+      await client.query(query1, [address, network]);
+      contractData = await client.query(query, [address, network]);
     }
     
-	let { riskRating, feedback } = getRiskRating(contractData.rows[0]);
+	let { riskRating, feedback } = await getRiskRating(client, network, contractData.rows[0]);
     var date = contractData.rows[0].creationDate;
 	var name = contractData.rows[0].contractName;
 	var contractVerified = contractData.rows[0].contractVerified;
+	var implementation = contractData.rows[0].implementation;
 
     if (date == "NA") {
 		const ETHERSCAN_ENDPOINT = getEtherscanEndpoint(network);
 		const _ETHERSCAN_API_KEY = getEtherscanAPIkey(network);
+		const ETHERSCAN_URL = getEtherscanURL(network);
 		const provider = getProvider(network);
 		const response = await fetch(
 			`${ETHERSCAN_ENDPOINT}?module=contract&action=getcontractcreation&contractaddresses=${address}&apikey=${_ETHERSCAN_API_KEY}`
@@ -236,6 +249,9 @@ async function getCreationDate(client: PoolClient, address: string, network: str
 		const data2:any = await response2.json();
 		console.log('data2', data2)
 
+		const response3 = await fetch(`${ETHERSCAN_URL}/address/${address}`)
+		const data3:any = await response3.text();
+
 		const txHash = data.result[0].txHash;
 
 		const tx = await provider.getTransaction(txHash);
@@ -248,9 +264,9 @@ async function getCreationDate(client: PoolClient, address: string, network: str
 		} 
 
 		if (data2.result == null || data2.result.length == 0) {
-			const query2 = 'UPDATE "ContractAddresses" SET "creationDate"=$1 WHERE "address" LIKE $2';
-			client.query(query2, [date, address]);
-			let riskInfo = getRiskRating({ verified: false, contractVerified: false, creationDate: date });
+			const query2 = 'UPDATE "ContractAddresses" SET "creationDate"=$1 WHERE "address" LIKE $2 AND "network" LIKE $3';
+			client.query(query2, [date, address, network]);
+			let riskInfo = await getRiskRating(client, network, { verified: false, contractVerified: false, creationDate: date });
 			riskRating = riskInfo.riskRating;
 			feedback = riskInfo.feedback;
 			return {
@@ -262,12 +278,25 @@ async function getCreationDate(client: PoolClient, address: string, network: str
 		}
 
 		contractVerified = data2.result[0].SourceCode ? true : false;
+		implementation = data2.result[0].Implementation
 
-		name = data2.result[0].ContractName;
+		if (implementation) {
+			await getCreationDate(client, implementation, network);
+		}
+
+		var title = data3.split('<title>')[1].split('</title>')[0]
+		const titleArr = title.split('|')
+		
+		if(titleArr.length == 3) {
+			name = titleArr[0].trim();
+		} else {
+			name = data2.result[0].ContractName;
+		}
+
 		console.log('name', name)
-		const query2 = 'UPDATE "ContractAddresses" SET "creationDate"=$1, "contractName"=$3, "contractVerified"=$4 WHERE "address" LIKE $2';
-		client.query(query2, [date, address, name, contractVerified]);
-		let riskInfo = getRiskRating({ verified: false, contractVerified, creationDate: date });
+		const query2 = 'UPDATE "ContractAddresses" SET "creationDate"=$1, "contractName"=$3, "contractVerified"=$4, "implementation"=$5 WHERE "address" LIKE $2 AND "network" LIKE $6';
+		client.query(query2, [date, address, name, contractVerified, implementation, network]);
+		let riskInfo = await getRiskRating(client, network, { verified: false, contractVerified, creationDate: date, implementation });
 		riskRating = riskInfo.riskRating;
 		feedback = riskInfo.feedback;
     }
@@ -290,7 +319,7 @@ async function getCreationDate(client: PoolClient, address: string, network: str
   };
 }
 
-function getRiskRating(contractRecord: any) {
+async function getRiskRating(client: PoolClient, network: string, contractRecord: any) {
 	console.log('contractRecord', contractRecord)
 	if (!contractRecord) {
 		return {
@@ -306,14 +335,30 @@ function getRiskRating(contractRecord: any) {
 	}
 	let riskRating = 'MEDIUM';
 	let feedback = [];
-	if (!contractRecord.contractVerified) {
+	
+	// @todo // try proxy detection
+  var implementationCreationDate;
+  var implementationContractVerified = true;
+
+	if(contractRecord.implementation) {
+		feedback.push('Proxy contract');
+		const query = 'SELECT * FROM "ContractAddresses" WHERE "address" LIKE $1 AND "network" LIKE $2';
+    var contractData = await client.query(query, [contractRecord.implementation, network]);
+
+		implementationContractVerified = contractData.rows[0].contractVerified;
+    implementationCreationDate  = contractData.rows[0].creationDate;
+	}
+
+  if (!contractRecord.contractVerified || !implementationContractVerified) {
 		feedback.push('Contract source code not verified');
 	}
-	// @todo // try proxy detection
+
 	let now = new Date();
-	if ((now.getTime() - new Date(contractRecord.creationDate).getTime()) < 86400000 * 120) { // 120 days
+	if ((now.getTime() - new Date(contractRecord.creationDate).getTime()) < 86400000 * 120 || 
+  (now.getTime() - new Date(implementationCreationDate).getTime()) < 86400000 * 120 ) { // 120 days
 		feedback.push('Contract is newly deployed. Maintain caution.');
 	}
+  
 	if (feedback.length == 0) {
 		riskRating = 'LOW';
 	}
